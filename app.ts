@@ -358,6 +358,46 @@ export function createApp(store: Store = new Store()): Server {
             }
           }
 
+          // Labels: create one (an issue may only carry a label created here).
+          if (tail.length >= 1 && tail[0] === 'labels') {
+            if (method === 'POST' && tail.length === 1) {
+              const raw = await readBody(req);
+              const parsed = parseJsonBody(raw);
+              if (!parsed.ok) {
+                sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+                return;
+              }
+              const body = (parsed.value ?? {}) as Record<string, unknown>;
+              const name = typeof body.name === 'string' ? body.name : '';
+              if (!name) {
+                sendJson(res, 422, { message: 'Validation Failed: name is required' }, extra);
+                return;
+              }
+              const existing = repo.labels.find((label) => label.name === name);
+              if (existing) {
+                sendJson(res, 200, { name: existing.name, color: existing.color, description: existing.description }, extra);
+                return;
+              }
+              const label = {
+                name,
+                color: typeof body.color === 'string' ? body.color : 'ededed',
+                description: typeof body.description === 'string' ? body.description : '',
+              };
+              repo.labels.push(label);
+              sendJson(res, 201, { name: label.name, color: label.color, description: label.description }, extra);
+              return;
+            }
+            if (method === 'GET' && tail.length === 1) {
+              sendJson(
+                res,
+                200,
+                repo.labels.map((label) => ({ name: label.name, color: label.color, description: label.description })),
+                extra,
+              );
+              return;
+            }
+          }
+
           // Issues: create (with label validation) and list.
           if (tail.length >= 1 && tail[0] === 'issues') {
             if (method === 'POST' && tail.length === 1) {

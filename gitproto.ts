@@ -215,11 +215,17 @@ function planFetch(
       continue;
     }
     if (object.type !== 'commit') continue;
-    if (stopAt(oid)) continue;
-    if (depth !== undefined && generation >= depth) continue;
-    addClosure(oid);
-    if (depth !== undefined && generation === depth - 1) {
-      keptBoundaries.add(oid);
+    const isHeld = stopAt(oid);
+    if (!isHeld) {
+      if (depth !== undefined && generation >= depth) continue;
+      addClosure(oid);
+      if (depth !== undefined && generation === depth - 1) {
+        keptBoundaries.add(oid);
+        continue;
+      }
+    } else if (depth === undefined || generation + 1 >= depth) {
+      // Held, and nothing past it is asked for: the client's depth bound (when
+      // there is one) is what may pull the walk through a held commit.
       continue;
     }
     const commit = parseCommit(object.data);
