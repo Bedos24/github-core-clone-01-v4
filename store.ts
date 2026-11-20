@@ -550,23 +550,21 @@ export class Store {
   /** The login the bearer token names, learned from the first owner-named request. */
   viewerLogin: string | null = null;
 
-  static key(owner: string, name: string): string {
-    return `${owner}/${name}`;
+  /** Learn the token's login from an owner-named request for a repo that exists. */
+  learnOwner(owner: string, repoName: string): void {
+    if (this.viewerLogin !== null) return;
+    if (!this.repos.has(repoName)) return;
+    this.viewerLogin = owner;
+    for (const repo of this.repos.values()) {
+      if (repo.owner === '') repo.owner = owner;
+    }
   }
 
-  learnOwner(owner: string): void {
-    if (this.viewerLogin === null) this.viewerLogin = owner;
-  }
-
-  isViewer(owner: string): boolean {
-    return this.viewerLogin === null || this.viewerLogin === owner;
-  }
-
-  createRepo(owner: string, name: string, description: string, isPrivate: boolean): Repo {
+  createRepo(name: string, description: string, isPrivate: boolean): Repo {
     const now = new Date().toISOString();
     const repo: Repo = {
       id: this.nextRepoId,
-      owner,
+      owner: this.viewerLogin ?? '',
       name,
       description,
       isPrivate,
@@ -580,16 +578,21 @@ export class Store {
       nextIssueNumber: 1,
     };
     this.nextRepoId += 1;
-    this.repos.set(Store.key(owner, name), repo);
+    this.repos.set(name, repo);
     return repo;
   }
 
   getRepo(owner: string, name: string): Repo | undefined {
-    return this.repos.get(Store.key(owner, name));
+    const repo = this.repos.get(name);
+    if (!repo) return undefined;
+    if (repo.owner !== '' && repo.owner !== owner) return undefined;
+    return repo;
   }
 
   listRepos(owner: string): Repo[] {
-    return [...this.repos.values()].filter((repo) => repo.owner === owner).sort((a, b) => a.id - b.id);
+    return [...this.repos.values()]
+      .filter((repo) => repo.owner === owner || repo.owner === '')
+      .sort((a, b) => a.id - b.id);
   }
 
   putObject(repo: Repo, type: GitObjectType, data: Buffer): string {
