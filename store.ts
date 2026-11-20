@@ -515,6 +515,14 @@ export interface Label {
   description: string;
 }
 
+export interface IssueComment {
+  id: number;
+  body: string;
+  userLogin: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Issue {
   id: number;
   number: number;
@@ -522,6 +530,23 @@ export interface Issue {
   body: string;
   state: 'open' | 'closed';
   labels: Label[];
+  userLogin: string;
+  createdAt: string;
+  updatedAt: string;
+  comments: IssueComment[];
+}
+
+export interface PullRequest {
+  id: number;
+  number: number;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  headBranch: string;
+  baseBranch: string;
+  merged: boolean;
+  mergedAt: string | null;
+  mergeCommitSha: string | null;
   userLogin: string;
   createdAt: string;
   updatedAt: string;
@@ -541,14 +566,27 @@ export interface Repo {
   labels: Label[];
   issues: Issue[];
   nextIssueNumber: number;
+  pulls: PullRequest[];
+  nextPullNumber: number;
 }
 
 export class Store {
   readonly repos = new Map<string, Repo>();
   private nextRepoId = 1;
   private nextIssueId = 1;
+  private nextPullId = 1;
+  private nextCommentId = 1;
   /** The login the bearer token names, learned from the first owner-named request. */
   viewerLogin: string | null = null;
+
+  /** Adopt a viewer login directly (an MCP create_repo names its owner); fixes owner-less repos. */
+  setViewerLogin(login: string): void {
+    if (this.viewerLogin !== null || login === '') return;
+    this.viewerLogin = login;
+    for (const repo of this.repos.values()) {
+      if (repo.owner === '') repo.owner = login;
+    }
+  }
 
   /** Learn the token's login from an owner-named request for a repo that exists. */
   learnOwner(owner: string, repoName: string): void {
@@ -576,6 +614,8 @@ export class Store {
       labels: [],
       issues: [],
       nextIssueNumber: 1,
+      pulls: [],
+      nextPullNumber: 1,
     };
     this.nextRepoId += 1;
     this.repos.set(name, repo);
@@ -604,6 +644,18 @@ export class Store {
   nextIssueIdFor(): number {
     const id = this.nextIssueId;
     this.nextIssueId += 1;
+    return id;
+  }
+
+  nextPullIdFor(): number {
+    const id = this.nextPullId;
+    this.nextPullId += 1;
+    return id;
+  }
+
+  nextCommentIdFor(): number {
+    const id = this.nextCommentId;
+    this.nextCommentId += 1;
     return id;
   }
 

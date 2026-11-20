@@ -25,21 +25,17 @@ TypeScript types on its own. There is nothing to install: the program imports
 ## Layout
 
 - `main.ts` — the lifecycle above.
-- `app.ts` — the HTTP server: routing, bearer auth, body reading, git
-  smart-HTTP wiring, and the minimal REST v3 surface (repositories, contents,
-  issues).
-- `store.ts` — the in-memory store, the git object model, pack read/write
-  (including OFS/REF delta decode), and pkt-line framing.
-- `gitproto.ts` — the git wire: protocol v2/v0 upload-pack (ls-refs, fetch
-  with shallow/deepen), v0 receive-pack with per-ref report-status, and the
-  fetch planner (what a fetch sends, which commits stay shallow).
+- `app.ts` — the HTTP server: routing, bearer <redacted>, body reading, git smart-HTTP wiring, and the REST v3 surface.
+- `store.ts` — the in-memory store, the git object model, pack read/write (including OFS/REF delta decode), and pkt-line framing.
+- `gitproto.ts` — the git wire: protocol v2/v0 upload-pack (ls-refs, fetch with shallow/deepen), v0 receive-pack with per-ref report-status, and the fetch planner (what a fetch sends, which commits stay shallow).
+- `rest.ts` — the shared forge domain behind all three API surfaces: pull requests, squash merges (three-way, current base tip), tree diffs, issue comments, and the v3 JSON shapes.
+- `graphql.ts` — GraphQL v4: a hand-written lexer/parser for the documents gh sends, the schema, and an executor over the store (viewer, repository, node, introspection, issues/pulls connections, mutations, batching).
+- `mcp.ts` — the MCP endpoint (POST /mcp, JSON-RPC 2.0): modern `server/discover` (2026-07-28) plus the legacy `initialize` handshake, six tools.
 - `package.json`, `tsconfig.json`, `LICENSE` (MIT).
 
 ## Status
 
-Part 1 of the build: the core (lifecycle, HTTP server, store, git protocol)
-plus the minimal REST the git conformance checks need. The full REST v3
-resources, GraphQL v4 and the MCP endpoint land in part 2.
+Complete: the core (lifecycle, HTTP server, store, git protocol), the full REST v3 resources, GraphQL v4 and the MCP endpoint. The kit's local conformance suite passes 120/120 (git 30/30, repos 15/15, issues 15/15, pulls 20/20, protocol 5/5, graphql 20/20, mcp 15/15).
 
 ## Notes on the protocol
 

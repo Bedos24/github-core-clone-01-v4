@@ -10,7 +10,23 @@ import {
   infoRefs,
   readContentsPath,
 } from './gitproto.ts';
-import { Store, type Issue, type Repo } from './store.ts';
+import { executeGraphQL } from './graphql.ts';
+import { handleMcp } from './mcp.ts';
+import {
+  branchTip,
+  createCommentRecord,
+  createIssueRecord,
+  createPullRecord,
+  deletePathCommit,
+  issueJson,
+  listCommits,
+  listIssues,
+  pullFiles,
+  pullJson,
+  repoJson,
+  squashMerge,
+} from './rest.ts';
+import { Store, type Repo } from './store.ts';
 
 const JSON_TYPE = 'application/json; charset=utf-8';
 
@@ -41,54 +57,6 @@ function parseJsonBody(raw: Buffer): { ok: true; value: unknown } | { ok: false 
   } catch {
     return { ok: false };
   }
-}
-
-function repoJson(repo: Repo): Record<string, unknown> {
-  return {
-    id: repo.id,
-    node_id: `R_${repo.id}`,
-    name: repo.name,
-    full_name: `${repo.owner}/${repo.name}`,
-    owner: { login: repo.owner, id: repo.id, type: 'User' },
-    private: repo.isPrivate,
-    html_url: `https://example.invalid/${repo.owner}/${repo.name}`,
-    description: repo.description,
-    fork: false,
-    created_at: repo.createdAt,
-    updated_at: repo.updatedAt,
-    pushed_at: repo.updatedAt,
-    homepage: null,
-    size: 0,
-    stargazers_count: 0,
-    watchers_count: 0,
-    language: null,
-    has_issues: true,
-    has_projects: true,
-    has_downloads: true,
-    has_wiki: true,
-    has_pages: false,
-    forks_count: 0,
-    open_issues_count: repo.issues.filter((issue) => issue.state === 'open').length,
-    license: null,
-    default_branch: repo.defaultBranch,
-  };
-}
-
-function issueJson(repo: Repo, issue: Issue): Record<string, unknown> {
-  return {
-    id: issue.id,
-    node_id: `I_${issue.id}`,
-    number: issue.number,
-    title: issue.title,
-    body: issue.body,
-    state: issue.state,
-    labels: issue.labels.map((label) => ({ name: label.name, color: label.color, description: label.description })),
-    user: { login: issue.userLogin, id: 0, type: 'User' },
-    created_at: issue.createdAt,
-    updated_at: issue.updatedAt,
-    html_url: `https://example.invalid/${repo.owner}/${repo.name}/issues/${issue.number}`,
-    comments: 0,
-  };
 }
 
 export function createApp(store: Store = new Store()): Server {
@@ -206,6 +174,21 @@ export function createApp(store: Store = new Store()): Server {
           return;
         }
 
+        // The token's user (the login is learned from owner-named requests).
+        if (method === 'GET' && rest.length === 1 && rest[0] === 'user') {
+          if (store.viewerLogin === null) {
+            sendJson(res, 404, { message: 'Not Found' }, extra);
+            return;
+          }
+          sendJson(
+            res,
+            200,
+            { login: store.viewerLogin, id: 1, type: 'User', html_url: `https://example.invalid/${store.viewerLogin}` },
+            extra,
+          );
+          return;
+        }
+
         // Create a repository for the token's user.
         if (method === 'POST' && rest.length === 2 && rest[0] === 'user' && rest[1] === 'repos') {
           const raw = await readBody(req);
@@ -271,6 +254,103 @@ export function createApp(store: Store = new Store()): Server {
             return;
           }
 
+          // PATCH the repository (description, visibility).
+          if (method === 'PATCH' && tail.length === 0) {
+            const raw = await readBody(req);
+            const parsed = parseJsonBody(raw);
+            if (!parsed.ok) {
+              sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+              return;
+            }
+            const body = (parsed.value ?? {}) as Record<string, unknown>;
+            if (typeof body.description === 'string') repo.description = body.description;
+            if (typeof body.private === 'boolean') repo.isPrivate = body.private;
+            repo.updatedAt = new Date().toISOString();
+            sendJson(res, 200, repoJson(repo), extra);
+            return;
+          }
+
+          // DELETE the repository.
+          if (method === 'DELETE' && tail.length === 0) {
+            store.repos.delete(repoName);
+            res.writeHead(204, { ...extra });
+            res.end();
+            return;
+          }
+
+          // Branches: list, and one branch.
+          if (tail.length >= 1 && tail[0] === 'branches') {
+            if (method === 'GET' && tail.length === 1) {
+              const branches = [...repo.refs.entries()]
+                .filter(([ref]) => ref.startsWith('refs/heads/'))
+                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([ref, sha]) => ({ name: ref.slice('refs/heads/'.length), commit: { sha }, protected: false }));
+              sendJson(res, 200, branches, extra);
+              return;
+            }
+            if (method === 'GET' && tail.length === 2) {
+              const sha = repo.refs.get(`refs/heads/${decodeURIComponent(tail[1])}`);
+              if (sha === undefined) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              sendJson(res, 200, { name: decodeURIComponent(tail[1]), commit: { sha }, protected: false }, extra);
+              return;
+            }
+          }
+
+          // Commits reachable from ?sha=<branch|oid> (default branch when omitted).
+          if (method === 'GET' && tail.length === 1 && tail[0] === 'commits') {
+            const sha = url.searchParams.get('sha') ?? repo.defaultBranch;
+            const commits = listCommits(repo, sha).map((entry) => ({
+              sha: entry.sha,
+              commit: { message: entry.message },
+              html_url: `https://example.invalid/${repo.owner}/${repo.name}/commit/${entry.sha}`,
+            }));
+            sendJson(res, 200, commits, extra);
+            return;
+          }
+
+          // Git Data refs: create a ref, read one head ref.
+          if (tail.length >= 2 && tail[0] === 'git' && tail[1] === 'refs') {
+            if (method === 'POST' && tail.length === 2) {
+              const raw = await readBody(req);
+              const parsed = parseJsonBody(raw);
+              if (!parsed.ok) {
+                sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+                return;
+              }
+              const body = (parsed.value ?? {}) as Record<string, unknown>;
+              const ref = typeof body.ref === 'string' ? body.ref : '';
+              const sha = typeof body.sha === 'string' ? body.sha : '';
+              if (!/^refs\/(heads|tags)\/[A-Za-z0-9._/-]+$/.test(ref) || !/^[0-9a-f]{40}$/.test(sha)) {
+                sendJson(res, 422, { message: 'Validation Failed: ref or sha is invalid' }, extra);
+                return;
+              }
+              if (repo.refs.has(ref)) {
+                sendJson(res, 422, { message: 'Validation Failed: ref already exists' }, extra);
+                return;
+              }
+              if (!repo.objects.has(sha)) {
+                sendJson(res, 422, { message: 'Validation Failed: sha does not exist in this repository' }, extra);
+                return;
+              }
+              repo.refs.set(ref, sha);
+              sendJson(res, 201, { ref, object: { sha } }, extra);
+              return;
+            }
+            if (method === 'GET' && tail.length === 4 && tail[2] === 'heads') {
+              const branch = decodeURIComponent(tail[3]);
+              const sha = repo.refs.get(`refs/heads/${branch}`);
+              if (sha === undefined) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              sendJson(res, 200, { ref: `refs/heads/${branch}`, object: { sha } }, extra);
+              return;
+            }
+          }
+
           // Contents: PUT creates/updates a file, GET reads a file or directory.
           if (tail.length >= 2 && tail[0] === 'contents') {
             const filePath = tail.slice(1).map((segment) => decodeURIComponent(segment)).join('/');
@@ -316,6 +396,34 @@ export function createApp(store: Store = new Store()): Server {
                 commit: { sha: result.commitSha, message },
               };
               sendJson(res, isUpdate ? 200 : 201, contentBody, extra);
+              return;
+            }
+            if (method === 'DELETE') {
+              const raw = await readBody(req);
+              const parsed = parseJsonBody(raw);
+              if (!parsed.ok) {
+                sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+                return;
+              }
+              const body = (parsed.value ?? {}) as Record<string, unknown>;
+              const message = typeof body.message === 'string' ? body.message : 'Delete file';
+              const branch = typeof body.branch === 'string' ? body.branch : repo.defaultBranch;
+              const sha = typeof body.sha === 'string' ? body.sha : undefined;
+              const existing = readContentsPath(repo, branch, filePath);
+              if (!existing || existing.kind !== 'file') {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              if (sha !== undefined && sha !== existing.oid) {
+                sendJson(res, 409, { message: 'Conflict: sha does not match the current file' }, extra);
+                return;
+              }
+              const result = deletePathCommit(repo, branch, filePath, message, store.viewerLogin ?? owner);
+              if ('error' in result) {
+                sendJson(res, 404, { message: result.error }, extra);
+                return;
+              }
+              sendJson(res, 200, { commit: { sha: result.commitSha, message } }, extra);
               return;
             }
             if (method === 'GET') {
@@ -398,7 +506,7 @@ export function createApp(store: Store = new Store()): Server {
             }
           }
 
-          // Issues: create (with label validation) and list.
+          // Issues: create (with label validation), list, read, patch, comments.
           if (tail.length >= 1 && tail[0] === 'issues') {
             if (method === 'POST' && tail.length === 1) {
               const raw = await readBody(req);
@@ -421,28 +529,203 @@ export function createApp(store: Store = new Store()): Server {
                 sendJson(res, 422, { message: `Validation Failed: label "${unknown[0]}" does not exist` }, extra);
                 return;
               }
-              const now = new Date().toISOString();
-              const issue: Issue = {
-                id: store.nextIssueIdFor(),
-                number: repo.nextIssueNumber,
+              const issue = createIssueRecord(
+                store,
+                repo,
                 title,
-                body: typeof body.body === 'string' ? body.body : '',
-                state: 'open',
-                labels: labelNames.map((name) => repo.labels.find((label) => label.name === name)!),
-                userLogin: store.viewerLogin ?? owner,
-                createdAt: now,
-                updatedAt: now,
-              };
-              repo.nextIssueNumber += 1;
-              repo.issues.push(issue);
+                typeof body.body === 'string' ? body.body : '',
+                labelNames.map((name) => repo.labels.find((label) => label.name === name)!),
+                store.viewerLogin ?? owner,
+              );
               sendJson(res, 201, issueJson(repo, issue), extra);
               return;
             }
             if (method === 'GET' && tail.length === 1) {
               const state = url.searchParams.get('state') ?? 'open';
-              const list = repo.issues.filter((issue) => state === 'all' || issue.state === state);
+              const sort = url.searchParams.get('sort') ?? 'created';
+              const direction = url.searchParams.get('direction') ?? 'desc';
+              const list = listIssues(repo, state, sort, direction);
               sendJson(res, 200, list.map((issue) => issueJson(repo, issue)), extra);
               return;
+            }
+            if (tail.length === 2) {
+              const number = Number(tail[1]);
+              const issue = repo.issues.find((entry) => entry.number === number);
+              if (!issue) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              if (method === 'GET') {
+                sendJson(res, 200, issueJson(repo, issue), extra);
+                return;
+              }
+              if (method === 'PATCH') {
+                const raw = await readBody(req);
+                const parsed = parseJsonBody(raw);
+                if (!parsed.ok) {
+                  sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+                  return;
+                }
+                const body = (parsed.value ?? {}) as Record<string, unknown>;
+                if (typeof body.state === 'string') {
+                  if (body.state !== 'open' && body.state !== 'closed') {
+                    sendJson(res, 422, { message: 'Validation Failed: state must be open or closed' }, extra);
+                    return;
+                  }
+                  issue.state = body.state;
+                }
+                if (typeof body.title === 'string') issue.title = body.title;
+                if (typeof body.body === 'string') issue.body = body.body;
+                if (Array.isArray(body.labels)) {
+                  const labelNames = body.labels.filter((label): label is string => typeof label === 'string');
+                  const unknown = labelNames.filter((name) => !repo.labels.some((label) => label.name === name));
+                  if (unknown.length) {
+                    sendJson(res, 422, { message: `Validation Failed: label "${unknown[0]}" does not exist` }, extra);
+                    return;
+                  }
+                  issue.labels = labelNames.map((name) => repo.labels.find((label) => label.name === name)!);
+                }
+                issue.updatedAt = new Date().toISOString();
+                sendJson(res, 200, issueJson(repo, issue), extra);
+                return;
+              }
+            }
+            if (tail.length === 3 && tail[2] === 'comments') {
+              const number = Number(tail[1]);
+              const issue = repo.issues.find((entry) => entry.number === number);
+              if (!issue) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              if (method === 'POST') {
+                const raw = await readBody(req);
+                const parsed = parseJsonBody(raw);
+                if (!parsed.ok) {
+                  sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+                  return;
+                }
+                const body = (parsed.value ?? {}) as Record<string, unknown>;
+                const commentBody = typeof body.body === 'string' ? body.body : '';
+                if (!commentBody) {
+                  sendJson(res, 422, { message: 'Validation Failed: body is required' }, extra);
+                  return;
+                }
+                const comment = createCommentRecord(store, issue, commentBody, store.viewerLogin ?? owner);
+                issue.updatedAt = new Date().toISOString();
+                sendJson(res, 201, {
+                  id: comment.id,
+                  node_id: `C_${comment.id}`,
+                  body: comment.body,
+                  user: { login: comment.userLogin, id: 0, type: 'User' },
+                  created_at: comment.createdAt,
+                  updated_at: comment.updatedAt,
+                  html_url: `https://example.invalid/${repo.owner}/${repo.name}/issues/${issue.number}#issuecomment-${comment.id}`,
+                }, extra);
+                return;
+              }
+              if (method === 'GET') {
+                sendJson(
+                  res,
+                  200,
+                  issue.comments.map((comment) => ({
+                    id: comment.id,
+                    node_id: `C_${comment.id}`,
+                    body: comment.body,
+                    user: { login: comment.userLogin, id: 0, type: 'User' },
+                    created_at: comment.createdAt,
+                    updated_at: comment.updatedAt,
+                    html_url: `https://example.invalid/${repo.owner}/${repo.name}/issues/${issue.number}#issuecomment-${comment.id}`,
+                  })),
+                  extra,
+                );
+                return;
+              }
+            }
+          }
+
+          // Pull requests: create, list, read, files, squash merge.
+          if (tail.length >= 1 && tail[0] === 'pulls') {
+            if (method === 'POST' && tail.length === 1) {
+              const raw = await readBody(req);
+              const parsed = parseJsonBody(raw);
+              if (!parsed.ok) {
+                sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+                return;
+              }
+              const body = (parsed.value ?? {}) as Record<string, unknown>;
+              const title = typeof body.title === 'string' ? body.title : '';
+              const head = typeof body.head === 'string' ? body.head : '';
+              const base = typeof body.base === 'string' ? body.base : repo.defaultBranch;
+              if (!title || !head) {
+                sendJson(res, 422, { message: 'Validation Failed: title and head are required' }, extra);
+                return;
+              }
+              const result = createPullRecord(store, repo, title, typeof body.body === 'string' ? body.body : '', head, base, store.viewerLogin ?? owner);
+              if ('error' in result) {
+                sendJson(res, 422, { message: `Validation Failed: ${result.error}` }, extra);
+                return;
+              }
+              sendJson(res, 201, pullJson(repo, result.pull), extra);
+              return;
+            }
+            if (method === 'GET' && tail.length === 1) {
+              const state = url.searchParams.get('state') ?? 'open';
+              const list = repo.pulls.filter((pull) => state === 'all' || (state === 'closed' ? pull.state === 'closed' : pull.state === 'open'));
+              sendJson(res, 200, list.map((pull) => pullJson(repo, pull)), extra);
+              return;
+            }
+            if (tail.length === 2) {
+              const number = Number(tail[1]);
+              const pull = repo.pulls.find((entry) => entry.number === number);
+              if (!pull) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              if (method === 'GET') {
+                sendJson(res, 200, pullJson(repo, pull), extra);
+                return;
+              }
+            }
+            if (tail.length === 3 && tail[2] === 'files') {
+              const number = Number(tail[1]);
+              const pull = repo.pulls.find((entry) => entry.number === number);
+              if (!pull) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              if (method === 'GET') {
+                const files = pullFiles(repo, pull).map((change) => ({
+                  filename: change.path,
+                  status: change.status,
+                  additions: change.additions,
+                  deletions: change.deletions,
+                  changes: change.additions + change.deletions,
+                  sha: change.newOid ?? change.oldOid,
+                }));
+                sendJson(res, 200, files, extra);
+                return;
+              }
+            }
+            if (tail.length === 3 && tail[2] === 'merge') {
+              const number = Number(tail[1]);
+              const pull = repo.pulls.find((entry) => entry.number === number);
+              if (!pull) {
+                sendJson(res, 404, { message: 'Not Found' }, extra);
+                return;
+              }
+              if (method === 'PUT') {
+                if (pull.state !== 'open') {
+                  sendJson(res, 405, { message: 'Method Not Allowed: the pull request is not open' }, extra);
+                  return;
+                }
+                const outcome = squashMerge(repo, pull, store.viewerLogin ?? owner);
+                if ('conflict' in outcome) {
+                  sendJson(res, 405, { message: `Merge conflict: ${outcome.conflict}` }, extra);
+                  return;
+                }
+                sendJson(res, 200, { merged: true, sha: outcome.mergeSha, message: `Merged pull request #${pull.number}` }, extra);
+                return;
+              }
             }
           }
 
@@ -459,6 +742,59 @@ export function createApp(store: Store = new Store()): Server {
           }
         }
         sendJson(res, 404, { message: 'Not Found' }, extra);
+        return;
+      }
+
+      // GraphQL v4: POST /api/graphql (single or batched documents).
+      if (segments.length === 2 && segments[0] === 'api' && segments[1] === 'graphql') {
+        if (method !== 'POST') {
+          sendJson(res, 405, { message: 'Method Not Allowed' }, extra);
+          return;
+        }
+        if (!authorized(req)) {
+          sendJson(res, 401, { message: 'Bad credentials' }, extra);
+          return;
+        }
+        const raw = await readBody(req);
+        const parsed = parseJsonBody(raw);
+        if (!parsed.ok) {
+          sendJson(res, 400, { message: 'Problems parsing JSON' }, extra);
+          return;
+        }
+        try {
+          const result = executeGraphQL(parsed.value, store);
+          sendJson(res, 200, result, extra);
+        } catch (err) {
+          sendJson(res, 200, { data: null, errors: [{ message: err instanceof Error ? err.message : String(err) }] }, extra);
+        }
+        return;
+      }
+
+      // MCP: POST /mcp (JSON-RPC 2.0), DELETE closes a legacy session.
+      if (segments.length === 1 && segments[0] === 'mcp') {
+        if (method === 'DELETE') {
+          res.writeHead(204, { ...extra });
+          res.end();
+          return;
+        }
+        if (method !== 'POST') {
+          sendJson(res, 405, { message: 'Method Not Allowed' }, extra);
+          return;
+        }
+        if (!authorized(req)) {
+          sendJson(res, 401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Unauthorized' } }, extra);
+          return;
+        }
+        const raw = await readBody(req);
+        const outcome = handleMcp(store, raw);
+        if (outcome.body === null) {
+          res.writeHead(outcome.status, { ...extra });
+          res.end();
+          return;
+        }
+        const headers: Record<string, string> = { ...extra };
+        if (outcome.sessionId !== null) headers['mcp-session-id'] = outcome.sessionId;
+        sendJson(res, outcome.status, outcome.body, headers);
         return;
       }
 
