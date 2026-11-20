@@ -1,4 +1,8 @@
-# github-core-clone-01 — a GitHub-compatible git forge
+# github-core-clone-01-v4
+
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/Bedos24/github-core-clone-01-v4/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/Bedos24/github-core-clone-01-v4/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 
 A standalone forge in TypeScript for Node 22, zero dependencies, no git binary,
 no network beyond the trial's env: it serves git smart HTTP (upload-pack
@@ -25,7 +29,7 @@ TypeScript types on its own. There is nothing to install: the program imports
 ## Layout
 
 - `main.ts` — the lifecycle above.
-- `app.ts` — the HTTP server: routing, bearer <redacted>, body reading, git smart-HTTP wiring, and the REST v3 surface.
+- `app.ts` — the HTTP server: routing, bearer auth, body reading, git smart-HTTP wiring, and the REST v3 surface.
 - `store.ts` — the in-memory store, the git object model, pack read/write (including OFS/REF delta decode), and pkt-line framing.
 - `gitproto.ts` — the git wire: protocol v2/v0 upload-pack (ls-refs, fetch with shallow/deepen), v0 receive-pack with per-ref report-status, and the fetch planner (what a fetch sends, which commits stay shallow).
 - `rest.ts` — the shared forge domain behind all three API surfaces: pull requests, squash merges (three-way, current base tip), tree diffs, issue comments, and the v3 JSON shapes.
@@ -47,3 +51,7 @@ Complete: the core (lifecycle, HTTP server, store, git protocol), the full REST 
   `ng <ref> non-fast-forward`, and the ref does not move.
 - Packs the forge sends are plain (undeltified) objects; packs it receives
   may carry OFS or REF deltas, resolved against the pack or the store.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=cqr5rs5e&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards</sub>
